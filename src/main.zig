@@ -38,9 +38,35 @@ pub fn main() anyerror!void {
 
     std.log.debug("MAX_MOVES = {}", .{utils.MAX_MOVES});
 
-    var moves = std.ArrayList(board.PieceMove).init(std.heap.c_allocator);
+    var move_buffer: [1024]board.PieceMove = undefined;
 
-    try b.collect_all_moves(&moves);
+    var count : i32 = 0;
 
-    std.log.debug("moves: {}", .{moves.items.len});
+    var outer : i32 = 0;
+        while (outer < 10000000) : (outer += 1)  {
+        var i: i32 = 0;
+        while (i < 100) : (i +=1) {
+            var c = b.collect_all_moves(move_buffer[0..]);
+
+            // std.log.debug("moves: {}", .{moves.items.len});
+            if (c == 0) {
+                break;
+            }
+            b.push_move(move_buffer[0]);
+            count += 1;
+            // _ = b.pop_move();
+        }
+
+        // _ = b.pop_move();
+
+        while (i > 0):(i -= 1) {
+
+            // _ = b.collect_all_moves(move_buffer[0..]);
+
+            // std.log.debug("moves: {}", .{moves.items.len});
+            _ = b.pop_move();
+        }
+    }
+
+    std.log.err("Made {} moves", .{count});
 }

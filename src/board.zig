@@ -31,7 +31,7 @@ pub const PieceType = enum(u3) { Pawn, Rook, Knight, Bishop, Queen, King };
 
 const PieceIndex = u4; // each player has at most 16 = 2^4 pieces
 
-pub const Action = union {
+pub const Action = union(enum) {
     const Capture = struct { piece: Piece, target: Piece };
     const Move = struct { from: Piece, to: Piece };
     const Promote = struct { old_piece: Piece, new_piece: Piece };
@@ -84,10 +84,11 @@ pub const Board = struct {
     all_moves_buffer: [utils.MAX_MOVES]Position = undefined,
 
     cells: [8][8]?Piece = [1][8]?Piece{[1]?Piece{null} ** 8} ** 8,
-    move_stack: std.ArrayList(PieceMove),
+    move_stack: [1024]PieceMove = undefined,
+    stack_depth: usize = 0,
 
-    pub fn init_empty(allocator: std.mem.Allocator) Board {
-        return Board{ .move_stack = std.ArrayList(PieceMove).init(allocator) };
+    pub fn init_empty(_: std.mem.Allocator) Board {
+        return .{};
     }
 
     pub fn create_classic_game(allocator: std.mem.Allocator) Board {
@@ -101,14 +102,85 @@ pub const Board = struct {
     }
 
     pub fn turn(self: Board) Color {
-        return if (self.move_stack.items.len % 2 == 0) .White else .Black;
+        return if (self.stack_depth % 2 == 0) .White else .Black;
     }
 
-    pub fn deinit(self: *Board) void {
-        self.move_stack.deinit();
+    pub fn deinit(_: *Board) void {
     }
 
-    pub fn make_move(self: *Board) void {}
+    pub fn make_move(self: *Board, move: PieceMove) void {
+        switch (move.action) {
+            .move => |m| {
+                self.remove_piece(m.from);
+                self.place_piece(m.to);
+            },
+            .promote => |m| {
+                self.remove_piece(m.old_piece);
+                self.place_piece(m.new_piece);
+            },
+            .capture => |m| {
+                self.remove_piece(m.target);
+                self.remove_piece(m.piece);
+                self.place_piece(m.piece.moved(m.target.position.x, m.target.position.y));
+            },
+            .capture_and_promote => |m| {
+                self.remove_piece(m.target);
+                self.remove_piece(m.piece);
+                const promoted = Piece {
+                    .t = .Queen,
+                    .position = m.target.position,
+                    .color = m.piece.color,
+                    .index = m.piece.index
+                };
+                self.place_piece(promoted);
+            }
+        }
+    }
+
+    pub fn unmake_move(self: *Board, move: PieceMove) void {
+        switch (move.action) {
+            .move => |m| {
+                self.remove_piece(m.to);
+                self.place_piece(m.from);
+            },
+            .promote => |m| {
+                self.remove_piece(m.new_piece);
+                self.place_piece(m.old_piece);
+            },
+            .capture => |m| {
+                self.remove_piece(m.piece.moved(m.target.position.x, m.target.position.y));
+                self.place_piece(m.piece);
+                self.place_piece(m.target);
+            },
+
+            .capture_and_promote => |m| {
+                const promoted = Piece {
+                    .t = .Queen,
+                    .position = m.target.position,
+                    .color = m.piece.color,
+                    .index = m.piece.index
+                };
+
+                self.remove_piece(promoted);
+                self.place_piece(m.piece);
+                self.place_piece(m.target);
+            }
+        }
+    }
+
+    pub fn push_move(self: *Board, move: PieceMove) void {
+        self.move_stack[self.stack_depth] = move;
+        self.stack_depth += 1;
+        self.make_move(move);
+    }
+
+    pub fn pop_move(self: *Board) PieceMove {
+        self.stack_depth -= 1;
+        const move = self.move_stack[self.stack_depth];
+        self.unmake_move(move);
+        return move;
+    }
+    
 
     pub fn cell_is_empty(self: Board, x: i32, y: i32) bool {
         return self.cells[@intCast(usize, x)][@intCast(usize, y)] == null;
@@ -121,6 +193,28 @@ pub const Board = struct {
 
     pub fn piece_at(self: Board, x: i32, y: i32) ?Piece {
         return self.cells[@intCast(usize, x)][@intCast(usize, y)];
+    }
+
+    pub fn place_piece(self: *Board, piece: Piece) void {
+        const x = piece.position.x;
+        const y = piece.position.y;
+        self.cells[@intCast(usize, x)][@intCast(usize, y)] = piece;
+        if (piece.color == .White) {
+            self.white_pieces[@intCast(usize, piece.index)] = piece;
+        } else {
+            self.black_pieces[@intCast(usize, piece.index)] = piece;
+        }
+    }
+
+    pub fn remove_piece(self: *Board, piece: Piece) void {
+        const x = piece.position.x;
+        const y = piece.position.y;
+        self.cells[@intCast(usize, x)][@intCast(usize, y)] = null;
+        if (piece.color == .White) {
+            self.white_pieces[@intCast(usize, piece.index)] = null;
+        } else {
+            self.black_pieces[@intCast(usize, piece.index)] = null;
+        }
     }
 
     pub fn add_new_piece(self: *Board, piece_type: PieceType, color: Color, x: i32, y: i32) void {
@@ -137,13 +231,14 @@ pub const Board = struct {
         }
     }
 
-    pub fn collect_all_moves(self: *Board, moves: *std.ArrayList(PieceMove)) !void {
+    pub fn collect_all_moves(self: *Board, moves: []PieceMove) usize {
+        var index: usize = 0;
         if (self.turn() == .White) {
             for (self.white_pieces) |piece| {
-                if (piece != null) {
-                    switch (piece.?.t) {
+                if (piece) |p| {
+                    switch (p.t) {
                         .Pawn => {
-                            try self.collect_white_pawn_moves(piece.?, moves);
+                            index = self.collect_white_pawn_moves(p, moves, index);
                         },
                         else => {},
                     }
@@ -151,92 +246,113 @@ pub const Board = struct {
             }
         } else {
             for (self.black_pieces) |piece| {
-                if (piece != null) {
-                    switch (piece.?.t) {
+                if (piece) |p| {
+                    switch (p.t) {
                         .Pawn => {
-                            try self.collect_black_pawn_moves(piece.?, moves);
+                            index = self.collect_black_pawn_moves(p, moves, index);
                         },
                         else => {},
                     }
                 }
             }
         }
+        return index;
     }
 
-    pub fn collect_white_pawn_moves(self: *Board, pawn: Piece, moves: *std.ArrayList(PieceMove)) !void {
+    pub fn collect_white_pawn_moves(self: *Board, pawn: Piece, moves: []PieceMove, index_in: usize) usize {
         const x = @intCast(i32, pawn.position.x);
         const y = @intCast(i32, pawn.position.y);
+
+        var index = index_in;
 
         if (y == 1) {
             if (self.cell_is_empty(x, y + 1)) {
                 if (self.cell_is_empty(x, y + 2)) {
-                    try moves.append(PieceMove.move(pawn, x, y + 2));
+                    moves[index] = PieceMove.move(pawn, x, y + 2);
+                    index += 1;
                 }
             }
         }
 
         if (y < 6) {
             if (self.cell_is_empty(x, y + 1)) {
-                try moves.append(PieceMove.move(pawn, x, y + 1));
+                moves[index] = PieceMove.move(pawn, x, y + 1);
+                index += 1;
             }
             if (x > 0 and self.cell_is_enemy(x - 1, y + 1, .White)) {
-                try moves.append(PieceMove.capture(pawn, self.piece_at(x - 1, y + 1).?));
+                moves[index] = PieceMove.capture(pawn, self.piece_at(x - 1, y + 1).?);
+                index += 1;
             }
 
             if (x < 7 and self.cell_is_enemy(x + 1, y + 1, .White)) {
-                try moves.append(PieceMove.capture(pawn, self.piece_at(x + 1, y + 1).?));
+                moves[index] = PieceMove.capture(pawn, self.piece_at(x + 1, y + 1).?);
+                index += 1;
             }
         } else if (y == 6) {
             if (self.cell_is_empty(x, y + 1)) {
-                try moves.append(PieceMove.promote(pawn, x, y + 1));
+                moves[index] = PieceMove.promote(pawn, x, y + 1);
+                index += 1;
             }
             if (x > 0 and self.cell_is_enemy(x - 1, y + 1, .White)) {
-                try moves.append(PieceMove.capture_and_promote(pawn, self.piece_at(x - 1, y + 1).?));
+                moves[index] = PieceMove.capture_and_promote(pawn, self.piece_at(x - 1, y + 1).?);
+                index += 1;
             }
 
             if (x < 7 and self.cell_is_enemy(x + 1, y + 1, .White)) {
-                try moves.append(PieceMove.capture_and_promote(pawn, self.piece_at(x + 1, y + 1).?));
+                moves[index] = PieceMove.capture_and_promote(pawn, self.piece_at(x + 1, y + 1).?);
+                index += 1;
             }
         }
+        return index;
     }
 
-    pub fn collect_black_pawn_moves(self: *Board, pawn: Piece, moves: *std.ArrayList(PieceMove)) !void {
+    pub fn collect_black_pawn_moves(self: *Board, pawn: Piece, moves: []PieceMove, index_in: usize) usize {
         const x = @intCast(i32, pawn.position.x);
         const y = @intCast(i32, pawn.position.y);
+
+        var index = index_in;
 
         if (y == 6) {
             if (self.cell_is_empty(x, y - 1)) {
                 if (self.cell_is_empty(x, y - 2)) {
-                    try moves.append(PieceMove.move(pawn, x, y - 2));
+                    moves[index] = PieceMove.move(pawn, x, y - 2);
+                    index += 1;
                 }
             }
         }
 
         if (y > 1) {
             if (self.cell_is_empty(x, y - 1)) {
-                try moves.append(PieceMove.move(pawn, x, y - 1));
+                moves[index] = PieceMove.move(pawn, x, y - 1);
+                index += 1;
             }
 
             if (x > 0 and self.cell_is_enemy(x - 1, y - 1, .Black)) {
-                try moves.append(PieceMove.capture(pawn, self.piece_at(x - 1, y - 1).?));
+                moves[index] = PieceMove.capture(pawn, self.piece_at(x - 1, y - 1).?);
+                index += 1;
             }
 
             if (x < 7 and self.cell_is_enemy(x + 1, y - 1, .Black)) {
-                try moves.append(PieceMove.capture(pawn, self.piece_at(x + 1, y - 1).?));
+                moves[index] = PieceMove.capture(pawn, self.piece_at(x + 1, y - 1).?);
+                index += 1;
             }
         } else if (y == 1) {
             if (self.cell_is_empty(x, y - 1)) {
-                try moves.append(PieceMove.promote(pawn, x, y - 1));
+                moves[index] = PieceMove.promote(pawn, x, y - 1);
+                index += 1;
             }
 
             if (x > 0 and self.cell_is_enemy(x - 1, y - 1, .Black)) {
-                try moves.append(PieceMove.capture_and_promote(pawn, self.piece_at(x - 1, y - 1).?));
+                moves[index] = PieceMove.capture_and_promote(pawn, self.piece_at(x - 1, y - 1).?);
+                index += 1;
             }
 
             if (x < 7 and self.cell_is_enemy(x + 1, y - 1, .Black)) {
-                try moves.append(PieceMove.capture_and_promote(pawn, self.piece_at(x + 1, y - 1).?));
+                moves[index] = PieceMove.capture_and_promote(pawn, self.piece_at(x + 1, y - 1).?);
+                index += 1;
             }
         }
+        return index;
     }
 
     pub fn precompute_all_moves(self: *Board) void {
